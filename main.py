@@ -90,6 +90,9 @@ def prepare_transform_floor():
 def prepare_heatmap():
     return np.zeros(shape=(432, 738, 3))
 
+def prepare_cl():
+    return np.zeros(shape=(432, 738, 1))
+
 def leg2floor(transform, x: int, y: int):
     input = np.zeros(shape=(3,))
     input[0] = x
@@ -99,17 +102,32 @@ def leg2floor(transform, x: int, y: int):
     output /= output[2]
     return int(output[0]), int(output[1])
 
-def update_heatmap(heatmap, transform, points: list):
+def locality(cl, x, y, l):
+    if( x >= 0 and x <=737 and y >= 0 and y <= 431):
+       y1 = y - l if y - l > 0 else 0
+       y2 = y + l if y + l <= 431 else 431
+       x1 = x - l if x - l > 0 else 0
+       x2 = x + l if x + l <= 737 else 737
+       for iy in range(y1, y2):
+           for ix in range(x1, x2):
+                if((x-ix)**2 + (y-iy)**2 < l**2):
+                    cl[iy, ix] += 1 - ((x-ix)**2 + (y-iy)**2) / l**2
+    #    print((x1, x2), (y1, y2))
+    #    print(cl[y1: y2, x1:x2])
+    return cl
+def update_heatmap(heatmap, cl, transform, points: list):
     for point in points:
         number_class = point[0]
         if number_class == 10 or number_class == 13:
             x, y = leg2floor(transform, point[1], point[2])
+            cl = locality(cl, x, y, 20)
             heatmap = cv2.circle(heatmap, (x, y), 7, (0, 0, 255), -1)
-    return heatmap
+
+    return heatmap, cl
 
 video_name = "people-detection.mp4"
 device = "CPU"
-path_to_model = "/opt/intel/openvino/deployment_tools/tools/model_downloader/intel/human-pose-estimation-0001/INT8/human-pose-estimation-0001"
+path_to_model = "human-pose-estimation-0001/INT8/human-pose-estimation-0001"
 model_xml = path_to_model + ".xml"
 model_bin = path_to_model + ".bin"
 path_to_extension = None
@@ -128,13 +146,27 @@ def main():
     input = dict.fromkeys([input_layer_name])
     capture_shape = get_capture_shape(capture)
     heatmap = prepare_heatmap()
+    cl = prepare_cl()
     transform = prepare_transform_floor()
+    frame_counter = 500
+    print(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    capture.set(cv2.CAP_PROP_POS_FRAMES, 500)
     while True:
         input[input_layer_name], frames = get_next_batch(capture, batch_size, input_shape)
         output = inference_sync(executable_network, input)
         output_points = human_pose_output(input_shape, frames, output, 0.5)
         for i in range(len(output_points)):
-            heatmap = update_heatmap(heatmap, transform, output_points[i])
+            heatmap, cl = update_heatmap(heatmap, cl, transform, output_points[i])
+            cl_norm = cl
+            cl_norm = cv2.normalize(cl, cl_norm, alpha=0, beta=255, 
+                                norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+            clMap = cv2.applyColorMap(cl_norm , cv2.COLORMAP_JET)
+            frame_counter += 1
+            print(frame_counter)
+            if frame_counter == capture.get(cv2.CAP_PROP_FRAME_COUNT) - 1:
+                frame_counter = 0 #Or whatever as long as it is the same as next line
+                capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            cv2.imshow('Colormap', clMap)
             cv2.imshow("Output", frames[i])
             cv2.imshow("Heatmap", heatmap)
             ch = cv2.waitKey(1)
