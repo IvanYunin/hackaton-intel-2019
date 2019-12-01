@@ -4,6 +4,8 @@ from copy import copy
 from time import time
 from openvino.inference_engine import IENetwork, IECore
 
+#----------------------------------------------------------------------------------------------------------
+
 input_layer_name = "data"
 
 def add_extension(iecore: IECore, path_to_extension: str, device: str):
@@ -87,6 +89,8 @@ def human_pose_output(network_shape: list, frames: list, output: dict, threshold
         output_points.append(pts)
     return output_points
 
+#----------------------------------------------------------------------------------------------------------
+
 realD = 432
 realW = 768
 realH = 100
@@ -101,11 +105,17 @@ def prepare_transform_floor():
     dest_points = np.float32([[0, 0],[realW - 1, 0],[0, realD - 1], [realW - 1, realD - 1]])
     return cv2.getPerspectiveTransform(curr_points, dest_points)
 
+def prepare_colormap_left_right_wall():
+    return np.zeros(shape=(realH, realD, 1))
+
+def prepare_colormap_front_wall():
+    return np.zeros(shape=(realD, realH, 1))
+
+def prepare_colormap_floor():
+    return np.zeros(shape=(realD, realW, 1))
+
 def prepare_heatmap():
     return np.zeros(shape=(realD, realW, 3))
-
-def prepare_cl():
-    return np.zeros(shape=(realD, realW, 1))
 
 def leg2floor(transform, x: int, y: int):
     input = np.zeros(shape=(3,))
@@ -158,7 +168,7 @@ def main():
     input = dict.fromkeys([input_layer_name])
     capture_shape = get_capture_shape(capture)
     heatmap = prepare_heatmap()
-    cl = prepare_cl()
+    cl = prepare_colormap_floor()
     transform = prepare_transform_floor()
     frame_counter = 500
     capture.set(cv2.CAP_PROP_POS_FRAMES, 500)
