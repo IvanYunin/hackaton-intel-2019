@@ -69,25 +69,26 @@ def inference_sync(executable_network, input: dict):
     inference_time = end_inference - start_inference
     return output, inference_time
 
-def human_pose_output(network_shape: list, frames: list, output: dict, threshold: float):
-    pairs = output["Mconv7_stage2_L1"]
-    points = output["Mconv7_stage2_L2"]
-    frameH = frames[0].shape[0]
-    frameW = frames[0].shape[1]
-    inputH = network_shape[2]
-    inputW = network_shape[3]
-    output_points = []
-    for number_frame in range(len(frames)):
-        pts = []
-        for i in range(18):
-            probMap = points[number_frame, i, :, :]
-            _, prob, _, point = cv2.minMaxLoc(probMap)
-            x = (frameW * point[0]) / 57
-            y = (frameH * point[1]) / 32
-            if prob > threshold:
-                pts.append((i, int(x), int(y))) # class, x, y
-        output_points.append(pts)
-    return output_points
+def detection_output(network_shape: list, frames: list, output: dict, threshold: float):
+    output_layer = "detection_out"
+    out = output[output_layer]
+    h, w  = frames[0].shape[:2]
+    output_points = [[] for i in range(len(frames))]
+    output_frames = frames.copy()
+    for string in out[0][0]:
+        if string[2] == -1:
+            break
+        if string[2] > threshold:
+            frame_number = int(string[0])
+            x_min = int(string[3] * w)
+            y_min = int(string[4] * h)
+            x_max = int(string[5] * w)
+            y_max = int(string[6] * h)
+            x_mid = int((x_min + x_max) / 2)
+            output_frames[frame_number] = cv2.rectangle(output_frames[frame_number], (x_min, y_min), (x_max, y_max), (0, 0, 255), 2)
+            if y_max < h - 5:
+                output_points[frame_number].append((x_mid, y_max))
+    return output_points, output_frames
 
 #----------------------------------------------------------------------------------------------------------
 
@@ -104,12 +105,6 @@ def prepare_transform_floor():
     curr_points = np.float32([floor_top_left, floor_top_right, floor_bottom_left, floor_bottom_right])
     dest_points = np.float32([[0, 0],[realW - 1, 0],[0, realD - 1], [realW - 1, realD - 1]])
     return cv2.getPerspectiveTransform(curr_points, dest_points)
-
-def prepare_colormap_left_right_wall():
-    return np.zeros(shape=(realH, realD, 1))
-
-def prepare_colormap_front_wall():
-    return np.zeros(shape=(realD, realH, 1))
 
 def prepare_colormap_floor():
     return np.zeros(shape=(realD, realW, 1))
@@ -140,19 +135,17 @@ def locality(cl, x, y, l):
 
 def update_heatmap(heatmap, cl, transform, points: list):
     for point in points:
-        number_class = point[0]
-        if number_class == 10 or number_class == 13:
-            x, y = leg2floor(transform, point[1], point[2])
-            cl = locality(cl, x, y, 20)
-            heatmap = cv2.circle(heatmap, (x, y), 7, (0, 0, 255), -1)
+        x, y = leg2floor(transform, point[0], point[1])
+        cl = locality(cl, x, y, 40)
+        heatmap = cv2.circle(heatmap, (x, y), 7, (0, 0, 255), -1)
     return heatmap, cl
 
 video_name = "people-detection.mp4"
-device = "GPU"
-path_to_model = "human-pose-estimation-0001/FP16/human-pose-estimation-0001"
+device = "CPU"
+path_to_model = "person-detection-retail-0013/FP32/person-detection-retail-0013"
 model_xml = path_to_model + ".xml"
 model_bin = path_to_model + ".bin"
-path_to_extension = None
+path_to_extension = "/opt/intel/openvino_2019.3.334/deployment_tools/inference_engine/lib/intel64/libcpu_extension_avx2.so"
 nthreads = None
 nstreams = 1
 batch_size = 1
@@ -176,7 +169,7 @@ def main():
         input[input_layer_name], frames = get_next_batch(capture, batch_size, input_shape)
         output, inference_time = inference_sync(executable_network, input)
         fps = batch_size / inference_time
-        output_points = human_pose_output(input_shape, frames, output, 0.5)
+        output_points, output_frames = detection_output(input_shape, frames, output, 0.5)
         for i in range(len(output_points)):
             heatmap, cl = update_heatmap(heatmap, cl, transform, output_points[i])
             cl_norm = cl
@@ -187,11 +180,11 @@ def main():
             if frame_counter == capture.get(cv2.CAP_PROP_FRAME_COUNT) - 1:
                 frame_counter = 0 #Or whatever as long as it is the same as next line
                 capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
-            frame = cv2.putText(frames[i], "FPS: {0:0.3f}".format(fps), (0, 40), cv2.FONT_HERSHEY_SIMPLEX,  
+            frame = cv2.putText(output_frames[i], "FPS: {0:0.3f}".format(fps), (0, 40), cv2.FONT_HERSHEY_SIMPLEX,  
                             1, (0, 0, 255), 1, cv2.LINE_AA)
             cv2.imshow('Colormap', clMap)
             cv2.imshow("Output", frame)
-            cv2.imshow("Heatmap", heatmap)
+            # cv2.imshow("Heatmap", heatmap)
             ch = cv2.waitKey(1)
         if ch & 255 == 27:
             break
