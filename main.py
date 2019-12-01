@@ -91,8 +91,13 @@ realD = 432
 realW = 768
 realH = 100
 
+floor_bottom_left = (0, realD - 1)
+floor_bottom_right = (realW - 1, realD - 1)
+floor_top_left = (90, 210)
+floor_top_right = (630, 210)
+
 def prepare_transform_floor():
-    curr_points = np.float32([[90, 210],[630, 210],[0, realD - 1], [realW - 1, realD - 1]])
+    curr_points = np.float32([floor_top_left, floor_top_right, floor_bottom_left, floor_bottom_right])
     dest_points = np.float32([[0, 0],[realW - 1, 0],[0, realD - 1], [realW - 1, realD - 1]])
     return cv2.getPerspectiveTransform(curr_points, dest_points)
 
