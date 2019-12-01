@@ -1,6 +1,7 @@
 import cv2
 import numpy as np
 from copy import copy
+from time import time
 from openvino.inference_engine import IENetwork, IECore
 
 input_layer_name = "data"
@@ -17,10 +18,10 @@ def set_config(iecore: IECore, device: str, nthreads: int, nstreams: int):
     if device == 'CPU':
         if nthreads:
             config.update({'CPU_THREADS_NUM': str(nthreads)})
-        # cpu_throughput = {'CPU_THROUGHPUT_STREAMS': 'CPU_THROUGHPUT_AUTO'}
-        # if nstreams:
-        #     cpu_throughput['CPU_THROUGHPUT_STREAMS'] = str(nstreams)
-        # config.update(cpu_throughput)
+        cpu_throughput = {'CPU_THROUGHPUT_STREAMS': 'CPU_THROUGHPUT_AUTO'}
+        if nstreams:
+            cpu_throughput['CPU_THROUGHPUT_STREAMS'] = str(nstreams)
+        config.update(cpu_throughput)
     if device == 'GPU':
         gpu_throughput = {'GPU_THROUGHPUT_STREAMS': 'GPU_THROUGHPUT_AUTO'}
         if nstreams:
@@ -60,7 +61,11 @@ def create_executable_network(iecore: IECore, network: IENetwork, device: str):
     return iecore.load_network(network=network, device_name=device)
 
 def inference_sync(executable_network, input: dict):
-    return executable_network.infer(inputs=input)
+    start_inference = time()
+    output = executable_network.infer(inputs=input)
+    end_inference = time()
+    inference_time = end_inference - start_inference
+    return output, inference_time
 
 def human_pose_output(network_shape: list, frames: list, output: dict, threshold: float):
     pairs = output["Mconv7_stage2_L1"]
@@ -82,16 +87,20 @@ def human_pose_output(network_shape: list, frames: list, output: dict, threshold
         output_points.append(pts)
     return output_points
 
+realD = 432
+realW = 768
+realH = 100
+
 def prepare_transform_floor():
-    curr_points = np.float32([[90, 210],[630, 210],[0,451], [767, 431]])
-    dest_points = np.float32([[0, 0],[767, 0],[0,451], [767, 431]])
+    curr_points = np.float32([[90, 210],[630, 210],[0, realD - 1], [realW - 1, realD - 1]])
+    dest_points = np.float32([[0, 0],[realW - 1, 0],[0, realD - 1], [realW - 1, realD - 1]])
     return cv2.getPerspectiveTransform(curr_points, dest_points)
 
 def prepare_heatmap():
-    return np.zeros(shape=(432, 738, 3))
+    return np.zeros(shape=(realD, realW, 3))
 
 def prepare_cl():
-    return np.zeros(shape=(432, 738, 1))
+    return np.zeros(shape=(realD, realW, 1))
 
 def leg2floor(transform, x: int, y: int):
     input = np.zeros(shape=(3,))
@@ -103,18 +112,17 @@ def leg2floor(transform, x: int, y: int):
     return int(output[0]), int(output[1])
 
 def locality(cl, x, y, l):
-    if( x >= 0 and x <=737 and y >= 0 and y <= 431):
+    if (0 <= x < realW and 0 <= y < realD):
        y1 = y - l if y - l > 0 else 0
-       y2 = y + l if y + l <= 431 else 431
+       y2 = y + l if y + l < realD else (realD - 1)
        x1 = x - l if x - l > 0 else 0
-       x2 = x + l if x + l <= 737 else 737
+       x2 = x + l if x + l < realW else (realW - 1)
        for iy in range(y1, y2):
            for ix in range(x1, x2):
                 if((x-ix)**2 + (y-iy)**2 < l**2):
                     cl[iy, ix] += 1 - ((x-ix)**2 + (y-iy)**2) / l**2
-    #    print((x1, x2), (y1, y2))
-    #    print(cl[y1: y2, x1:x2])
     return cl
+
 def update_heatmap(heatmap, cl, transform, points: list):
     for point in points:
         number_class = point[0]
@@ -122,17 +130,16 @@ def update_heatmap(heatmap, cl, transform, points: list):
             x, y = leg2floor(transform, point[1], point[2])
             cl = locality(cl, x, y, 20)
             heatmap = cv2.circle(heatmap, (x, y), 7, (0, 0, 255), -1)
-
     return heatmap, cl
 
 video_name = "people-detection.mp4"
-device = "CPU"
-path_to_model = "human-pose-estimation-0001/INT8/human-pose-estimation-0001"
+device = "GPU"
+path_to_model = "human-pose-estimation-0001/FP16/human-pose-estimation-0001"
 model_xml = path_to_model + ".xml"
 model_bin = path_to_model + ".bin"
 path_to_extension = None
 nthreads = None
-nstreams = None
+nstreams = 1
 batch_size = 1
 
 def main():
@@ -149,11 +156,11 @@ def main():
     cl = prepare_cl()
     transform = prepare_transform_floor()
     frame_counter = 500
-    print(capture.get(cv2.CAP_PROP_FRAME_COUNT))
     capture.set(cv2.CAP_PROP_POS_FRAMES, 500)
     while True:
         input[input_layer_name], frames = get_next_batch(capture, batch_size, input_shape)
-        output = inference_sync(executable_network, input)
+        output, inference_time = inference_sync(executable_network, input)
+        fps = batch_size / inference_time
         output_points = human_pose_output(input_shape, frames, output, 0.5)
         for i in range(len(output_points)):
             heatmap, cl = update_heatmap(heatmap, cl, transform, output_points[i])
@@ -162,12 +169,13 @@ def main():
                                 norm_type=cv2.NORM_MINMAX, dtype=cv2.CV_8U)
             clMap = cv2.applyColorMap(cl_norm , cv2.COLORMAP_JET)
             frame_counter += 1
-            print(frame_counter)
             if frame_counter == capture.get(cv2.CAP_PROP_FRAME_COUNT) - 1:
                 frame_counter = 0 #Or whatever as long as it is the same as next line
                 capture.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            frame = cv2.putText(frames[i], "FPS: {0:0.3f}".format(fps), (0, 40), cv2.FONT_HERSHEY_SIMPLEX,  
+                            1, (0, 0, 255), 1, cv2.LINE_AA)
             cv2.imshow('Colormap', clMap)
-            cv2.imshow("Output", frames[i])
+            cv2.imshow("Output", frame)
             cv2.imshow("Heatmap", heatmap)
             ch = cv2.waitKey(1)
         if ch & 255 == 27:
